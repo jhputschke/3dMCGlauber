@@ -52,6 +52,9 @@ class QCDString {
               bool has_baryon_right_in, bool has_baryon_left_in);
 
     real get_string_mass() const {return(mass_);}
+    //! a new mass at the same rapidities: E and p_z scale, the space-time
+    //! evolution (tau_form, eta_s) stays
+    void set_string_mass(real mass_in) {mass_ = mass_in;}
 
     real get_string_px() const {return(px_);}
     real get_string_py() const {return(py_);}

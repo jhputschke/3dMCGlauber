@@ -109,10 +109,11 @@ class EventGenerator {
     //! hydro run on the same event (Glauber::
     //! get_QCD_strings_output_list_hard_subtracted); the event is unchanged
     std::vector< std::vector<real> > get_QCD_strings_hard_subtracted(
-            const int collision_idx, const real E_proj, const real E_targ,
-            const int mode, std::vector<real> &info) {
+            const int collision_idx, const MomentumVec &p_proj,
+            const MomentumVec &p_targ, const int mode,
+            std::vector<real> &info) {
         return mc_glauber_ptr_->get_QCD_strings_output_list_hard_subtracted(
-            collision_idx, E_proj, E_targ, mode, info);
+            collision_idx, p_proj, p_targ, mode, info);
     }
     bool event_of_interest_trigger(const int Npart, const int Ncoll,
                                    const int Nstrings) const;

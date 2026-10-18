@@ -169,6 +169,35 @@ class Glauber {
                                  shared_ptr<Nucleon> n, const bool proj_side,
                                  const real E_take, const int i_side,
                                  std::vector<real> &info) const;
+    //! mode 2: the hard pair's strings with each other and the two hard
+    //! quarks' strings removed, the energy back to the remnants, the hard
+    //! process's momentum taken from the hard pair's remnants
+    void remove_hard_quarks(std::vector<QCDString> &strings,
+                            std::vector<QCDString> &remnants,
+                            shared_ptr<Nucleon> proj_n,
+                            shared_ptr<Nucleon> targ_n,
+                            const MomentumVec &p_proj,
+                            const MomentumVec &p_targ,
+                            std::vector<real> &info) const;
+    //! one end of a string moved by dy in rapidity and the string re-evolved
+    //! (info: 10 changed, 11 rapidity loss capped, 12 not reproduced before)
+    void shift_string_end(QCDString &s, const bool proj_side, const real dy,
+                          std::vector<real> &info) const;
+    //! a remnant's rapidity as produce_remnant_strings finds it (p_i put on
+    //! the light cone if space-like)
+    real remnant_rapidity(MomentumVec &p_i, const bool proj_side) const;
+    //! nucleon n's remnant string in remnants set to deposit E as MUSIC
+    //! counts it, at its rapidity (info[11] counts a capped rapidity loss of
+    //! a remnant string made)
+    int set_remnant_string(std::vector<QCDString> &remnants,
+                           shared_ptr<Nucleon> n, const bool proj_side,
+                           const real E, std::vector<real> &info) const;
+    //! the part of dy_full by which the strings idx of a quark can move
+    //! without changing any string's formation time (mode 1's limit)
+    real max_quark_shift(std::vector<QCDString> &strings,
+                         const std::vector<std::size_t> &idx,
+                         const bool proj_side, const real dy_full,
+                         const real tau_min) const;
     void computeCenterOfMass(real &x_o, real &y_o);
     void output_QCD_strings(std::string filename, const real Npart,
                             const real Ncoll, const real Nstrings,
@@ -204,25 +233,52 @@ class Glauber {
     //! event: a modified copy, the event itself is not changed, and every
     //! string keeps the event's centre of mass.  The event's strings must
     //! have been produced (perform_string_production) with valence quarks.
-    //!   mode 1: each nucleon's E_proj / E_targ [GeV] is taken from one of
+    //!   p_proj / p_targ: the four-momenta [GeV] taken from the projectile's
+    //!           and the target's nucleon.
+    //!   mode 1: each nucleon's energy p[0] is taken from one of
     //!           its valence quarks that made strings (E_q >= E + m_q; picked
     //!           by a hash of the candidates' rapidities, no random number is
     //!           drawn), or, if none has enough, from several, highest E_q
-    //!           first, up to 90 % of each.  The quark's rapidity is lowered
-    //!           to +-acosh((E_q - E)/m_q) and all its strings move with it,
-    //!           re-evolved as produced, so the strings deposit exactly E
-    //!           less unless a string's rapidity loss gets capped.
+    //!           first.  A quark gives at most 90 % of its energy above m_q,
+    //!           and no more than keeps every one of its strings' formation
+    //!           time (no capped rapidity loss, no end crossing the production
+    //!           point, no start before the event's earliest): MUSIC's tau0
+    //!           stays the event's; the rest is a shortfall (E taken < E).
+    //!           The quark's rapidity is lowered to +-acosh((E_q - E)/m_q) and
+    //!           all its strings move with it, re-evolved as produced, so the
+    //!           strings deposit exactly E less.
+    //!   mode 2: 3dMCGlauber's ISR picture without iColored: the hard pair's
+    //!           strings with each other and every string of one valence
+    //!           quark per side (as in mode 1, else the most energetic) are
+    //!           removed; every other quark that loses a string keeps its
+    //!           energy (its later strings start higher by the rapidity loss
+    //!           of the removed ones, its remnant moves to its last string
+    //!           kept, or goes to its nucleon's remnant if none is left); the
+    //!           hard quarks' energy goes to their nucleons' remnants, from
+    //!           which E is then taken (at most all of it): a remnant string
+    //!           keeps its rapidity and only its mass scales (its space-time
+    //!           evolution stays the event's; P_z follows), a nucleon without
+    //!           one gets a beam-rapidity one at its remnant's freeze-out
+    //!           point.  A
+    //!           removed string stays as a placeholder without energy (no
+    //!           rapidity loss, remnant or baryon number): it keeps its start,
+    //!           so MUSIC's tau0 stays the event's.
     //! info, HARD_SUBTRACTION_INFO entries:
-    //!   0/1 E requested proj/targ, 2/3 E taken, 4/5 quarks used,
-    //!   6/7 rapidity shift of the (first) quark, 8/9 its energy E_q,
+    //!   0/1 E requested proj/targ, 2/3 E taken, 4/5 quarks used (mode 2:
+    //!   the hard quark's strings), 6/7 rapidity shift of the (first) quark
+    //!   (mode 2: the hard nucleon's remnant energy after - before), 8/9 its
+    //!   energy E_q,
     //!   10 strings changed, 11 strings whose rapidity loss got capped,
     //!   12 strings evolve_QCD_string did not reproduce before the change,
     //!   13/14 E of the output before/after, 15/16 P_z before/after,
-    //!   17 strings between the hard pair
-    static constexpr int HARD_SUBTRACTION_INFO = 18;
+    //!   17 strings between the hard pair, 18 strings removed, 19 remnant
+    //!   strings changed, made or removed, 20 baryon numbers dropped with
+    //!   removed strings, 21/22 the earliest start of the sources before/after
+    //!   (MUSIC's rule; it sets MUSIC's tau0, so the twin needs them equal)
+    static constexpr int HARD_SUBTRACTION_INFO = 23;
     std::vector<std::vector<real>> get_QCD_strings_output_list_hard_subtracted(
-        const int collision_idx, const real E_proj, const real E_targ,
-        const int mode, std::vector<real> &info);
+        const int collision_idx, const MomentumVec &p_proj,
+        const MomentumVec &p_targ, const int mode, std::vector<real> &info);
 
     real get_sig_eff(const real siginNN);
 };

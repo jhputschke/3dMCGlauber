@@ -15,6 +15,7 @@
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+#include <tuple>
 
 using std::cout;
 using std::endl;
@@ -1457,99 +1458,133 @@ void output_energy(const std::vector<std::vector<real>> &out,
     }
 }
 
-}  // namespace
-
-
-void Glauber::take_energy_from_quarks(std::vector<QCDString> &strings,
-                                      shared_ptr<Nucleon> n,
-                                      const bool proj_side, const real E_take,
-                                      const int i_side,
-                                      std::vector<real> &info) const {
-    // the nucleon's quarks that made strings, in the order of their first
-    // string; a quark's rapidity only drops (rises on the target side) from
-    // string to string, so its energy is that at its extreme y_i
-    struct Chain {
-        shared_ptr<Quark> q;
-        real y0;
-        real mass;
-        std::vector<std::size_t> idx;
+//! the earliest start of the output rows' sources, by MUSIC's rule
+//! (HydroSourceStrings: tau_0 + tau_form, or the end's tau if the string
+//! lies on one side of its production point), which sets MUSIC's tau0
+real tau_start(const real tau_0, const real tau_form, const real eta_0,
+                const real eta_l, const real eta_r) {
+    auto end_tau = [&](const real eta) {
+        const real f1 = tau_0*tau_0 - tau_form*tau_form;
+        const real f2 = tau_0*cosh(eta - eta_0);
+        return(f2 + sqrt(f2*f2 - f1));
     };
+    if (eta_l > eta_0) return(end_tau(eta_l));
+    if (eta_r < eta_0) return(end_tau(eta_r));
+    return(tau_0 + tau_form);
+}
+
+real min_tau_start(const std::vector<std::vector<real>> &out) {
+    real tau_min = 1e30;
+    for (const auto &r: out)
+        tau_min = std::min(tau_min, tau_start(r[3], r[2], r[4], r[11], r[12]));
+    return(tau_min);
+}
+
+//! A valence quark's strings on one side (the projectile's quarks are the
+//! strings' right ends): its rapidity only drops (rises on the target side)
+//! from string to string, so y0, its extreme y_i, gives its energy, and idx
+//! runs from its first string to its last, which carries its remnant.
+struct Chain {
+    shared_ptr<Quark> q;
+    shared_ptr<Nucleon> n;
+    real y0;
+    real mass;
+    std::vector<std::size_t> idx;
+    real energy() const {return(mass*cosh(y0));}
+};
+
+//! the chains of nucleon n's quarks (of every nucleon on that side if n is
+//! null), in the order of their first string in strings
+std::vector<Chain> quark_chains(std::vector<QCDString> &strings,
+                                shared_ptr<Nucleon> n, const bool proj_side) {
     std::vector<Chain> chains;
     for (std::size_t i = 0; i < strings.size(); i++) {
         auto &s = strings[i];
-        if ((proj_side ? s.get_proj() : s.get_targ()) != n) continue;
+        auto n_i = proj_side ? s.get_proj() : s.get_targ();
+        if (n && n_i != n) continue;
         auto q = proj_side ? s.get_proj_q() : s.get_targ_q();
         const real y_i = proj_side ? s.get_y_i_right() : s.get_y_i_left();
         auto it = std::find_if(chains.begin(), chains.end(),
                                [&q](const Chain &c) {return c.q == q;});
         if (it == chains.end()) {
-            chains.push_back({q, y_i, s.get_string_mass(), {i}});
+            chains.push_back({q, n_i, y_i, s.get_string_mass(), {i}});
         } else {
             it->idx.push_back(i);
             it->y0 = proj_side ? std::max(it->y0, y_i) : std::min(it->y0, y_i);
         }
     }
-    info[i_side] = E_take;
-    if (chains.empty() || !(E_take > 0.)) return;
-    auto energy = [](const Chain &c) {return c.mass*cosh(c.y0);};
-
-    // one quark that can give E_take alone, picked by a hash of the
-    // candidates' rapidities (no random number: the event's stream is
-    // untouched); else several, the most energetic first
-    std::vector<std::pair<std::size_t, real>> takes;
-    std::vector<std::size_t> cand;
-    for (std::size_t k = 0; k < chains.size(); k++)
-        if (energy(chains[k]) >= E_take + chains[k].mass) cand.push_back(k);
-    if (!cand.empty()) {
-        std::uint64_t h = 1469598103934665603ULL;
-        for (auto k: cand) {
-            std::uint64_t w;
-            std::memcpy(&w, &chains[k].y0, sizeof(w));
-            h = (h ^ w)*1099511628211ULL;
-        }
-        takes.push_back({cand[h % cand.size()], E_take});
-    } else {
-        std::vector<std::size_t> order(chains.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::stable_sort(order.begin(), order.end(),
+    for (auto &c: chains) {
+        std::stable_sort(c.idx.begin(), c.idx.end(),
                          [&](std::size_t a, std::size_t b) {
-                             return energy(chains[a]) > energy(chains[b]);});
-        real left = E_take;
-        for (auto k: order) {
-            if (!(left > 0.)) break;
-            const real t = std::min(left,
-                                    0.9*(energy(chains[k]) - chains[k].mass));
-            if (!(t > 0.)) continue;
-            takes.push_back({k, t});
-            left -= t;
-        }
+                             return proj_side
+                                 ? strings[a].get_y_i_right() > strings[b].get_y_i_right()
+                                 : strings[a].get_y_i_left() < strings[b].get_y_i_left();});
     }
+    return(chains);
+}
 
-    const bool junctions = parameter_list.get_baryon_junctions();
-    real taken = 0.;
-    for (std::size_t j = 0; j < takes.size(); j++) {
-        auto &c = chains[takes[j].first];
-        const real E_q = energy(c);
-        const real y0_new = ((proj_side ? 1. : -1.)
-                             *acosh((E_q - takes[j].second)/c.mass));
-        const real dy = y0_new - c.y0;
-        if (j == 0) {
-            info[6 + i_side] = dy;
-            info[8 + i_side] = E_q;
-        }
-        for (auto i: c.idx) {
-            auto &s = strings[i];
-            // evolve_QCD_string must give the string as produced
-            QCDString check = s;
-            check.evolve_QCD_string();
-            if (std::abs(check.get_y_f_left()   - s.get_y_f_left())   > 1e-9
-             || std::abs(check.get_y_f_right()  - s.get_y_f_right())  > 1e-9
-             || std::abs(check.get_eta_s_left()  - s.get_eta_s_left())  > 1e-9
-             || std::abs(check.get_eta_s_right() - s.get_eta_s_right()) > 1e-9)
-                info[12] += 1;
+//! one of the candidate chains, by a hash of their rapidities (no random
+//! number: the event's stream is untouched)
+std::size_t hash_pick(const std::vector<Chain> &chains,
+                      const std::vector<std::size_t> &cand) {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (auto k: cand) {
+        std::uint64_t w;
+        std::memcpy(&w, &chains[k].y0, sizeof(w));
+        h = (h ^ w)*1099511628211ULL;
+    }
+    return(cand[h % cand.size()]);
+}
+
+}  // namespace
+
+
+void Glauber::shift_string_end(QCDString &s, const bool proj_side,
+                               const real dy, std::vector<real> &info) const {
+    // evolve_QCD_string must give the string as produced
+    QCDString check = s;
+    check.evolve_QCD_string();
+    if (std::abs(check.get_y_f_left()    - s.get_y_f_left())    > 1e-9
+     || std::abs(check.get_y_f_right()   - s.get_y_f_right())   > 1e-9
+     || std::abs(check.get_eta_s_left()  - s.get_eta_s_left())  > 1e-9
+     || std::abs(check.get_eta_s_right() - s.get_eta_s_right()) > 1e-9)
+        info[12] += 1;
+    const real tau_form = s.get_tau_form();
+    const real yb_l = s.get_y_f_baryon_left();
+    const real yb_r = s.get_y_f_baryon_right();
+    if (proj_side) {
+        s.set_initial_rapidities(s.get_y_i_left(), s.get_y_i_right() + dy);
+    } else {
+        s.set_initial_rapidities(s.get_y_i_left() + dy, s.get_y_i_right());
+    }
+    s.evolve_QCD_string();
+    if (s.get_tau_form() != tau_form) info[11] += 1;
+    if (!parameter_list.get_baryon_junctions()) {
+        s.set_final_baryon_rapidities(s.get_y_f_left(), s.get_y_f_right());
+    } else {
+        s.set_final_baryon_rapidities(yb_l + (proj_side ? 0. : dy),
+                                      yb_r + (proj_side ? dy : 0.));
+    }
+    info[10] += 1;
+}
+
+
+real Glauber::max_quark_shift(std::vector<QCDString> &strings,
+                              const std::vector<std::size_t> &idx,
+                              const bool proj_side, const real dy_full,
+                              const real tau_min) const {
+    // the part of dy_full (from 0) by which a quark's strings can move without
+    // a capped rapidity loss (which shortens tau_form), an end crossing the
+    // production point, or a string starting before tau_min, the event's
+    // earliest start: MUSIC's tau0 stays the event's
+    auto ok = [&](const real dy) {
+        for (auto i: idx) {
+            QCDString s = strings[i];
             const real tau_form = s.get_tau_form();
-            const real yb_l = s.get_y_f_baryon_left();
-            const real yb_r = s.get_y_f_baryon_right();
+            const auto x = s.get_x_production();
+            const real eta_0 = 0.5*log((x[0] + x[3])/(x[0] - x[3]));
+            const bool around = (s.get_eta_s_left() <= eta_0
+                                 && eta_0 <= s.get_eta_s_right());
             if (proj_side) {
                 s.set_initial_rapidities(s.get_y_i_left(),
                                          s.get_y_i_right() + dy);
@@ -1558,16 +1593,91 @@ void Glauber::take_energy_from_quarks(std::vector<QCDString> &strings,
                                          s.get_y_i_right());
             }
             s.evolve_QCD_string();
-            if (s.get_tau_form() != tau_form) info[11] += 1;
-            if (!junctions) {
-                s.set_final_baryon_rapidities(s.get_y_f_left(),
-                                              s.get_y_f_right());
-            } else {
-                s.set_final_baryon_rapidities(yb_l + (proj_side ? 0. : dy),
-                                              yb_r + (proj_side ? dy : 0.));
-            }
-            info[10] += 1;
+            if (s.get_tau_form() != tau_form) return(false);
+            if (around && !(s.get_eta_s_left() <= eta_0
+                            && eta_0 <= s.get_eta_s_right()))
+                return(false);
+            const real tau_0 = sqrt(x[0]*x[0] - x[3]*x[3]);
+            if (tau_start(tau_0, s.get_tau_form(), eta_0, s.get_eta_s_left(),
+                          s.get_eta_s_right()) < tau_min)
+                return(false);
         }
+        return(true);
+    };
+    if (ok(dy_full)) return(dy_full);
+    real lo = 0.;
+    real hi = dy_full;
+    for (int it = 0; it < 50; it++) {
+        const real mid = 0.5*(lo + hi);
+        if (ok(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return(ok(lo) ? lo : 0.);
+}
+
+
+void Glauber::take_energy_from_quarks(std::vector<QCDString> &strings,
+                                      shared_ptr<Nucleon> n,
+                                      const bool proj_side, const real E_take,
+                                      const int i_side,
+                                      std::vector<real> &info) const {
+    const real tau_min = info[21];   // the event's earliest start
+    auto chains = quark_chains(strings, n, proj_side);
+    info[i_side] = E_take;
+    if (chains.empty() || !(E_take > 0.)) return;
+
+    // what each quark can give: at most 90 % of its energy above m_q, and no
+    // more than keeps its strings' formation times (max_quark_shift)
+    std::vector<real> E_max(chains.size());
+    for (std::size_t k = 0; k < chains.size(); k++) {
+        const auto &c = chains[k];
+        const real sign = proj_side ? 1. : -1.;
+        const real E_q = c.energy();
+        const real dy_full = (sign*acosh((E_q - 0.9*(E_q - c.mass))/c.mass)
+                              - c.y0);
+        const real dy = max_quark_shift(strings, c.idx, proj_side, dy_full,
+                                        tau_min);
+        E_max[k] = E_q - c.mass*cosh(c.y0 + dy);
+    }
+    // one quark that can give E_take alone; else several, the most
+    // energetic first
+    std::vector<std::pair<std::size_t, real>> takes;
+    std::vector<std::size_t> cand;
+    for (std::size_t k = 0; k < chains.size(); k++)
+        if (E_max[k] >= E_take) cand.push_back(k);
+    if (!cand.empty()) {
+        takes.push_back({hash_pick(chains, cand), E_take});
+    } else {
+        std::vector<std::size_t> order(chains.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) {
+                             return chains[a].energy() > chains[b].energy();});
+        real left = E_take;
+        for (auto k: order) {
+            if (!(left > 0.)) break;
+            const real t = std::min(left, E_max[k]);
+            if (!(t > 0.)) continue;
+            takes.push_back({k, t});
+            left -= t;
+        }
+    }
+
+    real taken = 0.;
+    for (std::size_t j = 0; j < takes.size(); j++) {
+        auto &c = chains[takes[j].first];
+        const real E_q = c.energy();
+        const real y0_new = ((proj_side ? 1. : -1.)
+                             *acosh((E_q - takes[j].second)/c.mass));
+        const real dy = y0_new - c.y0;
+        if (j == 0) {
+            info[6 + i_side] = dy;
+            info[8 + i_side] = E_q;
+        }
+        for (auto i: c.idx) shift_string_end(strings[i], proj_side, dy, info);
         taken += takes[j].second;
     }
     info[2 + i_side] = taken;
@@ -1575,16 +1685,261 @@ void Glauber::take_energy_from_quarks(std::vector<QCDString> &strings,
 }
 
 
+real Glauber::remnant_rapidity(MomentumVec &p_i, const bool proj_side) const {
+    // as produce_remnant_strings: the remnant's rapidity, a space-like
+    // remnant put on the light cone (p_i changed accordingly)
+    const real mass_min = 1.e-3;
+    real y_rem = proj_side ? ybeam : -ybeam;
+    auto pT_i = std::sqrt(p_i[1]*p_i[1] + p_i[2]*p_i[2]);
+    auto virtuality = p_i[0]*p_i[0] - pT_i*pT_i - p_i[3]*p_i[3];
+    if (virtuality >= mass_min*mass_min) {
+        y_rem = 0.5*log((p_i[0] + p_i[3])/(p_i[0] - p_i[3]));
+    } else {
+        auto pT_temp = std::min(pT_i,
+                                std::sqrt(p_i[0]*p_i[0] - mass_min*mass_min));
+        if (pT_temp < pT_i) {
+            p_i[1] = p_i[1]*pT_temp/pT_i;
+            p_i[2] = p_i[2]*pT_temp/pT_i;
+        }
+        pT_i = pT_temp;
+        auto ymax = acosh(p_i[0]/std::sqrt(pT_i*pT_i + mass_min*mass_min));
+        y_rem = (proj_side ? 1. : -1.)*std::min(ymax, ybeam);
+        auto mT_square = p_i[0]*p_i[0]/cosh(y_rem)/cosh(y_rem);
+        p_i[3] = std::sqrt(mT_square)*sinh(y_rem);
+    }
+    return(y_rem);
+}
+
+
+int Glauber::set_remnant_string(std::vector<QCDString> &remnants,
+                                shared_ptr<Nucleon> n, const bool proj_side,
+                                const real E, std::vector<real> &info) const {
+    // nucleon n's remnant string set to deposit E as MUSIC counts a remnant
+    // (mass cosh y): an existing one keeps its rapidity and only its mass
+    // scales, so its space-time evolution and start stay the event's (1; 3:
+    // removed, E <= 1e-3 GeV); a nucleon without one gets one at its
+    // remnant's freeze-out point with the settings of the first remnant
+    // string of its side (2); 0: nothing to do
+    const real mass_min = 1.e-3;
+    auto it = std::find_if(remnants.begin(), remnants.end(),
+                           [&](QCDString &r) {
+                               return(r.get_proj() == n && r.get_targ() == n
+                                      && (proj_side ? r.get_has_remnant_right()
+                                                    : r.get_has_remnant_left()));});
+    if (it != remnants.end()) {
+        if (E <= mass_min) {
+            remnants.erase(it);
+            return(3);
+        }
+        const real y = proj_side ? it->get_y_i_right() : it->get_y_i_left();
+        it->set_string_mass(E/cosh(y));
+        return(1);
+    }
+    if (E <= mass_min) return(0);
+    const QCDString *like = nullptr;
+    for (auto &r: remnants)
+        if (proj_side ? r.get_has_remnant_right() : r.get_has_remnant_left()) {
+            like = &r;
+            break;
+        }
+    if (!like) return(0);
+    // beam-like, as the remnants are: on the light cone at the beam rapidity
+    MomentumVec p_i = {E, 0., 0., 0.};
+    const real y = proj_side ? ybeam : -ybeam;
+    p_i[3] = E*tanh(y);
+    MomentumVec mirror = {p_i[0], 0., 0., -p_i[3]};
+    const bool baryon = n->is_remnant_carry_baryon_number();
+    QCDString r = proj_side
+        ? QCDString(n->get_remnant_x_frez(), like->get_tau_form(), n, n,
+                    p_i, mirror, like->get_m_over_sigma(), baryon, false)
+        : QCDString(n->get_remnant_x_frez(), like->get_tau_form(), n, n,
+                    mirror, p_i, like->get_m_over_sigma(), false, baryon);
+    if (proj_side) {
+        r.set_has_remnant_right(true);
+    } else {
+        r.set_has_remnant_left(true);
+    }
+    r.evolve_QCD_string();
+    if (r.get_tau_form() != like->get_tau_form()) info[11] += 1;
+    if (proj_side) {
+        r.set_final_baryon_rapidities(0., r.get_y_f_right());
+    } else {
+        r.set_final_baryon_rapidities(r.get_y_f_left(), 0.);
+    }
+    remnants.push_back(r);
+    return(2);
+}
+
+
+void Glauber::remove_hard_quarks(std::vector<QCDString> &strings,
+                                 std::vector<QCDString> &remnants,
+                                 shared_ptr<Nucleon> proj_n,
+                                 shared_ptr<Nucleon> targ_n,
+                                 const MomentumVec &p_proj,
+                                 const MomentumVec &p_targ,
+                                 std::vector<real> &info) const {
+    // 3dMCGlauber's ISR picture (Pick_and_subtract_hard_parton_momentum)
+    // without iColored: the hard pair makes no string with each other, the
+    // two hard quarks make no strings at all, and the energy they and the
+    // pair's strings would have carried goes back to the nucleons' remnants,
+    // from which the hard process's momentum is taken
+    std::vector<char> rm(strings.size(), 0);
+    shared_ptr<Quark> hard_q[2];
+    for (int side = 0; side < 2; side++) {
+        const bool proj_side = side == 0;
+        auto chains = quark_chains(strings, proj_side ? proj_n : targ_n,
+                                   proj_side);
+        info[side] = (proj_side ? p_proj : p_targ)[0];
+        if (chains.empty()) continue;
+        std::vector<std::size_t> cand;
+        for (std::size_t k = 0; k < chains.size(); k++)
+            if (chains[k].energy() >= info[side]) cand.push_back(k);
+        std::size_t k;
+        if (!cand.empty()) {
+            k = hash_pick(chains, cand);
+        } else {
+            k = 0;
+            for (std::size_t j = 1; j < chains.size(); j++)
+                if (chains[j].energy() > chains[k].energy()) k = j;
+        }
+        hard_q[side] = chains[k].q;
+        info[8 + side] = chains[k].energy();
+        for (auto i: chains[k].idx) rm[i] = 1;
+        info[4 + side] = chains[k].idx.size();
+    }
+    for (std::size_t i = 0; i < strings.size(); i++)
+        if (strings[i].get_proj() == proj_n && strings[i].get_targ() == targ_n)
+            rm[i] = 1;
+
+    // every other quark that loses a string keeps its energy: its later
+    // strings start higher by the rapidity loss of the removed ones, and its
+    // remnant moves to its last string kept; a quark left without strings
+    // gives its energy back to its nucleon's remnant
+    struct Back {
+        shared_ptr<Nucleon> n;
+        bool proj_side;
+        MomentumVec p;
+    };
+    std::vector<Back> back;     // in the order met: the output's order fixed
+    auto back_of = [&](shared_ptr<Nucleon> n, bool proj_side) -> Back & {
+        auto it = std::find_if(back.begin(), back.end(),
+                               [&n](const Back &b) {return b.n == n;});
+        if (it != back.end()) return(*it);
+        back.push_back({n, proj_side, {0., 0., 0., 0.}});
+        return(back.back());
+    };
+    auto give_back = [&](const Chain &c, bool proj_side) {
+        auto &b = back_of(c.n, proj_side);
+        b.p[0] += c.energy();
+        b.p[3] += c.mass*sinh(c.y0);
+    };
+    std::vector<std::tuple<std::size_t, bool, real>> shifts;
+    std::vector<std::pair<std::size_t, bool>> new_remnant_end;
+    for (int side = 0; side < 2; side++) {
+        const bool proj_side = side == 0;
+        for (auto &c: quark_chains(strings, nullptr, proj_side)) {
+            bool touched = false;
+            for (auto i: c.idx) touched = touched || rm[i];
+            if (!touched) continue;
+            if (c.q == hard_q[side]) {
+                give_back(c, proj_side);
+                continue;
+            }
+            real shift = 0.;
+            std::size_t last_kept = strings.size();
+            for (auto i: c.idx) {
+                auto &s = strings[i];
+                if (rm[i]) {
+                    shift += (proj_side ? s.get_y_i_right() - s.get_y_f_right()
+                                        : s.get_y_i_left() - s.get_y_f_left());
+                } else {
+                    if (shift != 0.) shifts.emplace_back(i, proj_side, shift);
+                    last_kept = i;
+                }
+            }
+            if (!rm[c.idx.back()]) continue;
+            if (last_kept < strings.size()) {
+                new_remnant_end.emplace_back(last_kept, proj_side);
+            } else {
+                give_back(c, proj_side);
+            }
+        }
+    }
+    for (auto &t: shifts)
+        shift_string_end(strings[std::get<0>(t)], std::get<1>(t),
+                         std::get<2>(t), info);
+    for (auto &e: new_remnant_end) {
+        if (e.second) {
+            strings[e.first].set_has_remnant_right(true);
+        } else {
+            strings[e.first].set_has_remnant_left(true);
+        }
+    }
+
+    // the remnants: what came back, the hard pair's minus the hard process
+    // in MUSIC's measure of a remnant row (mass cosh y_i), so the strings
+    // deposit exactly what is taken less (P_z follows the remnants'
+    // rapidities)
+    back_of(proj_n, true);
+    back_of(targ_n, false);
+    for (auto &b: back) {
+        real E = 0.;
+        auto it = std::find_if(remnants.begin(), remnants.end(),
+                               [&](QCDString &r) {
+                                   return(r.get_proj() == b.n && r.get_targ() == b.n
+                                          && (b.proj_side ? r.get_has_remnant_right()
+                                                          : r.get_has_remnant_left()));});
+        if (it != remnants.end()) {
+            const real y = b.proj_side ? it->get_y_i_right() : it->get_y_i_left();
+            E = it->get_string_mass()*cosh(y);
+        }
+        const real E_before = E;
+        E += b.p[0];
+        int side = -1;
+        if (b.n == proj_n) side = 0;
+        if (b.n == targ_n) side = 1;
+        if (side >= 0) {
+            const MomentumVec &p_take = side == 0 ? p_proj : p_targ;
+            const real available = std::max(0., E - 1.e-3);
+            const real taken = std::min(p_take[0], available);
+            const real f = p_take[0] > 0. ? taken/p_take[0] : 0.;
+            E -= f*p_take[0];
+            info[2 + side] = taken;
+            info[6 + side] = E - E_before;
+        }
+        if (set_remnant_string(remnants, b.n, b.proj_side, E, info) != 0)
+            info[19] += 1;
+    }
+
+    // a removed string stays as a placeholder without energy (no rapidity
+    // loss, no remnant, no baryon number): it deposits nothing but keeps its
+    // start, so the strings' earliest start, and with it MUSIC's tau0, stays
+    // the event's
+    for (std::size_t i = 0; i < strings.size(); i++) {
+        if (!rm[i]) continue;
+        auto &s = strings[i];
+        s.set_final_rapidities(s.get_y_i_left(), s.get_y_i_right());
+        s.set_has_remnant_left(false);
+        s.set_has_remnant_right(false);
+        if (s.get_has_baryon_left()) info[20] += 1;
+        if (s.get_has_baryon_right()) info[20] += 1;
+        s.set_has_baryon_left(false);
+        s.set_has_baryon_right(false);
+        info[18] += 1;
+    }
+}
+
+
 std::vector<std::vector<real>>
 Glauber::get_QCD_strings_output_list_hard_subtracted(
-        const int collision_idx, const real E_proj, const real E_targ,
-        const int mode, std::vector<real> &info) {
+        const int collision_idx, const MomentumVec &p_proj,
+        const MomentumVec &p_targ, const int mode, std::vector<real> &info) {
     info.assign(HARD_SUBTRACTION_INFO, 0.);
     if (!sample_valence_quark) {
         throw std::runtime_error(
             "Glauber: the hard subtraction needs valence quarks");
     }
-    if (mode != 1) {
+    if (mode != 1 && mode != 2) {
         throw std::invalid_argument(
             "Glauber: unknown hard subtraction mode " + std::to_string(mode));
     }
@@ -1610,10 +1965,17 @@ Glauber::get_QCD_strings_output_list_hard_subtracted(
     std::vector<std::vector<real>> out;
     fill_QCD_string_output(strings, remnants, x_o, y_o, out);
     output_energy(out, info[13], info[15]);
-    take_energy_from_quarks(strings, proj_n, true,  E_proj, 0, info);
-    take_energy_from_quarks(strings, targ_n, false, E_targ, 1, info);
+    info[21] = min_tau_start(out);
+    if (mode == 1) {
+        take_energy_from_quarks(strings, proj_n, true,  p_proj[0], 0, info);
+        take_energy_from_quarks(strings, targ_n, false, p_targ[0], 1, info);
+    } else {
+        remove_hard_quarks(strings, remnants, proj_n, targ_n, p_proj, p_targ,
+                           info);
+    }
     fill_QCD_string_output(strings, remnants, x_o, y_o, out);
     output_energy(out, info[14], info[16]);
+    info[22] = min_tau_start(out);
     return(out);
 }
 
