@@ -157,6 +157,18 @@ class Glauber {
     void update_collision_schedule(shared_ptr<CollisionEvent> event_happened);
 
     void prepare_output_QCD_strings();
+    //! the output rows of the strings and remnant strings, centred on (x_o, y_o)
+    void fill_QCD_string_output(std::vector<QCDString> &strings,
+                                std::vector<QCDString> &remnants,
+                                const real x_o, const real y_o,
+                                std::vector<std::vector<real>> &out) const;
+    //! LO hard subtraction, mode 1: take E_take from the valence quarks of
+    //! nucleon n (on the projectile side if proj_side) in strings, a copy of
+    //! the event's; fills info's entries of side i_side (0 proj, 1 targ)
+    void take_energy_from_quarks(std::vector<QCDString> &strings,
+                                 shared_ptr<Nucleon> n, const bool proj_side,
+                                 const real E_take, const int i_side,
+                                 std::vector<real> &info) const;
     void computeCenterOfMass(real &x_o, real &y_o);
     void output_QCD_strings(std::string filename, const real Npart,
                             const real Ncoll, const real Nstrings,
@@ -185,6 +197,32 @@ class Glauber {
         prepare_output_QCD_strings();
         return(QCD_string_output_arr_);
     }
+
+    //! The string output of this event with a hard process's energy taken
+    //! from the two nucleons of binary collision collision_idx (an index of
+    //! get_collision_information()), for a second hydro run on the same
+    //! event: a modified copy, the event itself is not changed, and every
+    //! string keeps the event's centre of mass.  The event's strings must
+    //! have been produced (perform_string_production) with valence quarks.
+    //!   mode 1: each nucleon's E_proj / E_targ [GeV] is taken from one of
+    //!           its valence quarks that made strings (E_q >= E + m_q; picked
+    //!           by a hash of the candidates' rapidities, no random number is
+    //!           drawn), or, if none has enough, from several, highest E_q
+    //!           first, up to 90 % of each.  The quark's rapidity is lowered
+    //!           to +-acosh((E_q - E)/m_q) and all its strings move with it,
+    //!           re-evolved as produced, so the strings deposit exactly E
+    //!           less unless a string's rapidity loss gets capped.
+    //! info, HARD_SUBTRACTION_INFO entries:
+    //!   0/1 E requested proj/targ, 2/3 E taken, 4/5 quarks used,
+    //!   6/7 rapidity shift of the (first) quark, 8/9 its energy E_q,
+    //!   10 strings changed, 11 strings whose rapidity loss got capped,
+    //!   12 strings evolve_QCD_string did not reproduce before the change,
+    //!   13/14 E of the output before/after, 15/16 P_z before/after,
+    //!   17 strings between the hard pair
+    static constexpr int HARD_SUBTRACTION_INFO = 18;
+    std::vector<std::vector<real>> get_QCD_strings_output_list_hard_subtracted(
+        const int collision_idx, const real E_proj, const real E_targ,
+        const int mode, std::vector<real> &info);
 
     real get_sig_eff(const real siginNN);
 };
